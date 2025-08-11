@@ -1,0 +1,196 @@
+version: '3.8'
+
+#####################################################
+# Dependency-Track PoC Setup
+# 
+# This Docker Compose file contains:
+#   - Dependency-Track API Server
+#   - Dependency-Track Frontend
+#   - PostgreSQL Database
+#   - Persistent volumes for data storage
+#####################################################
+
+volumes:
+  dependency-track-data:
+    driver: local
+  dependency-track-postgres:
+    driver: local
+  pgadmin-data:
+    driver: local
+
+networks:
+  dependency-track:
+    driver: bridge
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: dtrack-postgres
+    environment:
+      POSTGRES_DB: dtrack
+      POSTGRES_USER: dtrack
+      POSTGRES_PASSWORD: changeme123!
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --lc-collate=C --lc-ctype=C"
+    volumes:
+      - dependency-track-postgres:/var/lib/postgresql/data
+    networks:
+      - dependency-track
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dtrack -d dtrack"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  # Dependency-Track API Server
+  dtrack-apiserver:
+    image: dependencytrack/apiserver:4.12.0
+    container_name: dtrack-apiserver
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Database Configuration
+      ALPINE_DATABASE_MODE: external
+      ALPINE_DATABASE_URL: jdbc:postgresql://postgres:5432/dtrack
+      ALPINE_DATABASE_DRIVER: org.postgresql.Driver
+      ALPINE_DATABASE_USERNAME: dtrack
+      ALPINE_DATABASE_PASSWORD: changeme123!
+      ALPINE_DATABASE_POOL_ENABLED: true
+      ALPINE_DATABASE_POOL_MAX_SIZE: 20
+      ALPINE_DATABASE_POOL_MIN_IDLE: 10
+      ALPINE_DATABASE_POOL_IDLE_TIMEOUT: 300000
+      ALPINE_DATABASE_POOL_MAX_LIFETIME: 600000
+      
+      # CORS Configuration for better API access
+      ALPINE_CORS_ENABLED: true
+      ALPINE_CORS_ALLOW_ORIGIN: "*"
+      ALPINE_CORS_ALLOW_METHODS: "GET, POST, PUT, DELETE, OPTIONS"
+      ALPINE_CORS_ALLOW_HEADERS: "Origin, Content-Type, Authorization, X-Requested-With, Content-Length, Accept, X-Api-Key, X-Total-Count"
+      ALPINE_CORS_EXPOSE_HEADERS: "Origin, Content-Type, Authorization, X-Requested-With, Content-Length, Accept, X-Api-Key, X-Total-Count"
+      ALPINE_CORS_ALLOW_CREDENTIALS: true
+      ALPINE_CORS_MAX_AGE: 3600
+      
+      # HTTP Timeout Settings (for SBOM processing)
+      ALPINE_HTTP_TIMEOUT_CONNECTION: 60
+      ALPINE_HTTP_TIMEOUT_SOCKET: 60
+      ALPINE_HTTP_TIMEOUT_POOL: 120
+      
+      # Logging Configuration
+      LOGGING_LEVEL: INFO
+      
+      # Metrics Configuration
+      ALPINE_METRICS_ENABLED: true
+      
+      # System Requirements (adjust if needed for lower-spec systems)
+      SYSTEM_REQUIREMENT_CHECK_ENABLED: true
+      
+      # Memory allocation for JVM
+      EXTRA_JAVA_OPTIONS: "-XX:MaxRAMPercentage=75.0 -XX:+UseStringDeduplication"
+      
+      # Vulnerability Analyzer Configuration
+      # OSS Index Configuration
+      OSSINDEX_REQUEST_MAX_PURL: 128
+      OSSINDEX_RETRY_BACKOFF_MAX_ATTEMPTS: 50
+      OSSINDEX_RETRY_BACKOFF_MULTIPLIER: 2
+      OSSINDEX_RETRY_BACKOFF_MAX_DURATION: 600000
+      
+      # Snyk Configuration
+      SNYK_THREAD_POOL_SIZE: 10
+      SNYK_RETRY_MAX_ATTEMPTS: 6
+      SNYK_RETRY_EXPONENTIAL_BACKOFF_MULTIPLIER: 2
+      SNYK_RETRY_EXPONENTIAL_BACKOFF_INITIAL_DURATION_SECONDS: 1
+      SNYK_RETRY_EXPONENTIAL_BACKOFF_MAX_DURATION_SECONDS: 60
+      
+      # Repository Metadata Analyzer Configuration
+      REPO_META_ANALYZER_CACHESTAMPEDEBLOCKER_ENABLED: true
+      REPO_META_ANALYZER_CACHESTAMPEDEBLOCKER_LOCK_BUCKETS: 1000
+      REPO_META_ANALYZER_CACHESTAMPEDEBLOCKER_MAX_ATTEMPTS: 10
+    
+    deploy:
+      resources:
+        limits:
+          memory: 8192m
+        reservations:
+          memory: 4096m
+    
+    volumes:
+      # Main data volume for uploads, reports, and configuration
+      - dependency-track-data:/data
+      # Optional: Mount a local directory for SBOM uploads
+      # - ./sbom-uploads:/data/uploads
+      # Optional: Mount custom notification templates
+      # - ./templates:/data/templates
+    
+    networks:
+      - dependency-track
+    
+    ports:
+      - "8081:8080"
+    
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/api/version || exit 1"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 120s
+    
+    restart: unless-stopped
+
+  # Dependency-Track Frontend
+  dtrack-frontend:
+    image: dependencytrack/frontend:4.12.0
+    container_name: dtrack-frontend
+    depends_on:
+      dtrack-apiserver:
+        condition: service_healthy
+    environment:
+      # API Server Configuration
+      # This URL must be reachable by browsers, not just the container
+      API_BASE_URL: http://localhost:8081
+      
+      # Optional OIDC Configuration (uncomment if using SSO)
+      # OIDC_ISSUER: ""
+      # OIDC_CLIENT_ID: ""
+      # OIDC_SCOPE: "openid profile email"
+      # OIDC_FLOW: "implicit"
+      # OIDC_LOGIN_BUTTON_TEXT: "Login with SSO"
+    
+    networks:
+      - dependency-track
+    
+    ports:
+      - "8080:8080"
+    
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    
+    restart: unless-stopped
+
+  # Optional: pgAdmin for database management (development/debugging)
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: dtrack-pgadmin
+    profiles:
+      - debug
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@dependencytrack.local
+      PGADMIN_DEFAULT_PASSWORD: admin123
+      PGADMIN_CONFIG_SERVER_MODE: 'False'
+    volumes:
+      - pgadmin-data:/var/lib/pgadmin
+    networks:
+      - dependency-track
+    ports:
+      - "5050:80"
+    depends_on:
+      - postgres
+    restart: unless-stopped 
